@@ -212,8 +212,8 @@ function createDate(day: string, monthName: string, year: string, hour: string, 
 		hour24 = 0;
 	}
 	
-	// Create UTC date to avoid timezone interpretation issues
-	return new Date(Date.UTC(parseInt(year, 10), monthIndex, parseInt(day, 10), hour24, parseInt(minute, 10)));
+	// Create local JST date (not UTC) to avoid timezone conversion by ical-generator
+	return new Date(parseInt(year, 10), monthIndex, parseInt(day, 10), hour24, parseInt(minute, 10));
 }
 
 async function fetchExternalEvents(): Promise<FaBEvent[]> {
