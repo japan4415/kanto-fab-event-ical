@@ -4,7 +4,7 @@
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "batch",
+	"name": "kanto-fab-events-ical-batch",
 	"main": "src/index.ts",
 	"compatibility_date": "2025-08-03",
 	"observability": {
