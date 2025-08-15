@@ -11,6 +11,11 @@ interface FaBEvent {
 	details: string;
 }
 
+interface Env {
+	BUCKET: R2Bucket;
+	ENV?: string;
+}
+
 const ORDINAL_REGEX = /(\d{1,2})(st|nd|rd|th)/gi;
 const JST_OFFSET = 9 * 60; // JST is UTC+9
 
@@ -29,7 +34,7 @@ export default {
 			console.log(`Found ${officialEvents.length} official events`);
 			
 			// Get events from external iCal feeds
-			const externalEvents = await fetchExternalEvents();
+			const externalEvents = await fetchExternalEvents(env);
 			console.log(`Found ${externalEvents.length} external events`);
 			
 			// Remove duplicates and combine events
@@ -216,7 +221,7 @@ function createDate(day: string, monthName: string, year: string, hour: string, 
 	return new Date(parseInt(year, 10), monthIndex, parseInt(day, 10), hour24, parseInt(minute, 10));
 }
 
-async function fetchExternalEvents(): Promise<FaBEvent[]> {
+async function fetchExternalEvents(env?: Env): Promise<FaBEvent[]> {
 	const allExternalEvents: FaBEvent[] = [];
 	
 	for (const feedUrl of EXTERNAL_ICAL_FEEDS) {
@@ -230,7 +235,7 @@ async function fetchExternalEvents(): Promise<FaBEvent[]> {
 			}
 			
 			const icalText = await response.text();
-			const events = parseICalEvents(icalText, feedUrl);
+			const events = parseICalEvents(icalText, feedUrl, env);
 			console.log(`Parsed ${events.length} events from ${feedUrl}`);
 			
 			allExternalEvents.push(...events);
@@ -242,8 +247,9 @@ async function fetchExternalEvents(): Promise<FaBEvent[]> {
 	return allExternalEvents;
 }
 
-function parseICalEvents(icalText: string, source: string): FaBEvent[] {
+function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[] {
 	const events: FaBEvent[] = [];
+	const isCloudflare = (env?.ENV || 'local') === 'cloudflare';
 	
 	try {
 		const jcalData = ICAL.parse(icalText);
@@ -290,7 +296,13 @@ function parseICalEvents(icalText: string, source: string): FaBEvent[] {
 							let count = 0;
 							let next;
 							while ((next = recurExpander.next()) && count < 50 && next.toJSDate() <= sixMonthsLater) {
-								const occurrenceDate = next.toJSDate();
+								let occurrenceDate = next.toJSDate();
+								
+								// Cloudflare環境では9時間後に変換
+								if (isCloudflare) {
+									occurrenceDate = new Date(occurrenceDate.getTime() + (JST_OFFSET * 60000));
+								}
+								
 								if (occurrenceDate >= now) {
 									// Determine source name from URL
 									let sourceName = 'External';
@@ -322,10 +334,15 @@ function parseICalEvents(icalText: string, source: string): FaBEvent[] {
 								sourceName = 'Tokyo FAB';
 							}
 							
+							// Cloudflare環境では9時間後に変換
+							const adjustedStartDate = isCloudflare && startDate 
+								? new Date(startDate.getTime() + (JST_OFFSET * 60000))
+								: startDate;
+								
 							events.push({
 								title: `${summary}@${sourceName}`,
 								eventType: 'External Event',
-								startDatetime: startDate,
+								startDatetime: adjustedStartDate || new Date(),
 								location: location,
 								format: 'External',
 								details: description
@@ -341,10 +358,15 @@ function parseICalEvents(icalText: string, source: string): FaBEvent[] {
 							sourceName = 'Tokyo FAB';
 						}
 						
+						// Cloudflare環境では9時間後に変換
+						const adjustedStartDate = isCloudflare && startDate 
+							? new Date(startDate.getTime() + (JST_OFFSET * 60000))
+							: startDate;
+							
 						events.push({
 							title: `${summary}@${sourceName}`,
 							eventType: 'External Event',
-							startDatetime: startDate,
+							startDatetime: adjustedStartDate || new Date(),
 							location: location,
 							format: 'External',
 							details: description
