@@ -8,8 +8,8 @@ async function main() {
 		const officialEvents = await scrapeEventFinder();
 		console.log(`Found ${officialEvents.length} official events`);
 		
-		// Get events from external iCal feeds
-		const externalEvents = await fetchExternalEvents();
+		// Get events from external iCal feeds (local環境)
+		const externalEvents = await fetchExternalEvents({ BUCKET: {} as any, ENV: 'local' });
 		console.log(`Found ${externalEvents.length} external events`);
 		
 		// Remove duplicates and combine events

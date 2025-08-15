@@ -208,3 +208,6 @@ __marimo__/
 
 # Generated calendar files
 calendar.ics
+
+# serena
+.serena
