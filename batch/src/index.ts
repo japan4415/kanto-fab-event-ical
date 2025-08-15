@@ -247,6 +247,33 @@ async function fetchExternalEvents(env?: Env): Promise<FaBEvent[]> {
 	return allExternalEvents;
 }
 
+function detectEventType(title: string): string {
+	const titleLower = title.toLowerCase();
+	
+	// Project Blue detection (check for full name first)
+	if (titleLower.includes('project blue') || titleLower.includes('pb')) {
+		return 'Project Blue';
+	}
+	
+	// Classic Constructed detection
+	if (titleLower.includes('cc') || titleLower.includes('classic')) {
+		return 'Classic Constructed';
+	}
+	
+	// Blitz detection
+	if (titleLower.includes('blitz') || titleLower.includes('ブリッツ')) {
+		return 'Blitz';
+	}
+	
+	// Living Legend detection
+	if (titleLower.includes('living legend') || titleLower.includes('ll')) {
+		return 'Living Legend';
+	}
+	
+	// Default fallback
+	return 'External Event';
+}
+
 function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[] {
 	const events: FaBEvent[] = [];
 	const isCloudflare = (env?.ENV || 'local') === 'cloudflare';
@@ -312,12 +339,15 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 										sourceName = 'Tokyo FAB';
 									}
 									
+									// Detect event type from title
+									const eventType = detectEventType(summary);
+									
 									events.push({
 										title: `${summary}@${sourceName}`,
-										eventType: 'External Event',
+										eventType: eventType,
 										startDatetime: occurrenceDate,
 										location: location,
-										format: 'External',
+										format: eventType === 'External Event' ? 'External' : eventType,
 										details: description
 									});
 								}
@@ -339,12 +369,15 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 								? new Date(startDate.getTime() + (JST_OFFSET * 60000))
 								: startDate;
 								
+							// Detect event type from title
+							const eventType = detectEventType(summary);
+								
 							events.push({
 								title: `${summary}@${sourceName}`,
-								eventType: 'External Event',
+								eventType: eventType,
 								startDatetime: adjustedStartDate || new Date(),
 								location: location,
-								format: 'External',
+								format: eventType === 'External Event' ? 'External' : eventType,
 								details: description
 							});
 						}
@@ -363,12 +396,15 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 							? new Date(startDate.getTime() + (JST_OFFSET * 60000))
 							: startDate;
 							
+						// Detect event type from title
+						const eventType = detectEventType(summary);
+							
 						events.push({
 							title: `${summary}@${sourceName}`,
-							eventType: 'External Event',
+							eventType: eventType,
 							startDatetime: adjustedStartDate || new Date(),
 							location: location,
-							format: 'External',
+							format: eventType === 'External Event' ? 'External' : eventType,
 							details: description
 						});
 					}
@@ -381,7 +417,26 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 		console.error('Error parsing iCal data:', error);
 	}
 	
-	return events;
+	// Remove duplicates within external events from the same source
+	const uniqueEvents = removeDuplicateExternalEvents(events);
+	console.log(`External event deduplication: ${events.length} -> ${uniqueEvents.length} events`);
+	
+	return uniqueEvents;
+}
+
+function removeDuplicateExternalEvents(events: FaBEvent[]): FaBEvent[] {
+	const uniqueEvents: FaBEvent[] = [];
+	
+	for (const event of events) {
+		const isDuplicate = uniqueEvents.some(existing => isDuplicateEvent(event, existing));
+		if (!isDuplicate) {
+			uniqueEvents.push(event);
+		} else {
+			console.log(`External duplicate removed: ${event.title} matches existing event`);
+		}
+	}
+	
+	return uniqueEvents;
 }
 
 function removeDuplicateEvents(officialEvents: FaBEvent[], externalEvents: FaBEvent[]): FaBEvent[] {
@@ -441,26 +496,42 @@ function isDuplicateEvent(event1: FaBEvent, event2: FaBEvent): boolean {
 	// 場所の比較（同じ店舗かどうか）
 	const location1 = event1.location.toLowerCase();
 	const location2 = event2.location.toLowerCase();
+	const title1 = event1.title.toLowerCase();
+	const title2 = event2.title.toLowerCase();
 	
 	const isSameVenue = (
+		// Both locations contain the same venue name
 		(location1.includes('fable') && location2.includes('fable')) ||
 		(location1.includes('tokyo fab') && location2.includes('tokyo fab')) ||
 		(location1.includes('cardon') && location2.includes('cardon')) ||
-		(location1.includes('amenity dream') && location2.includes('amenity dream'))
+		(location1.includes('amenity dream') && location2.includes('amenity dream')) ||
+		// Or both titles contain the same venue name (handle empty location case)
+		(title1.includes('@fable') && title2.includes('@fable')) ||
+		(title1.includes('@tokyo fab') && title2.includes('@tokyo fab')) ||
+		(title1.includes('@cardon') && title2.includes('@cardon')) ||
+		(title1.includes('@amenity dream') && title2.includes('@amenity dream'))
 	);
 	
 	if (!isSameVenue) {
 		return false;
 	}
 	
-	// タイトル・形式の類似度チェック
-	const title1 = event1.title.toLowerCase();
-	const title2 = event2.title.toLowerCase();
+	// フォーマットの比較（同じフォーマットかどうか）
 	const format1 = event1.format.toLowerCase();
 	const format2 = event2.format.toLowerCase();
 	
+	// フォーマットが同じかチェック
+	const isSameFormat = (
+		format1 === format2 ||
+		event1.eventType.toLowerCase() === event2.eventType.toLowerCase()
+	);
+	
+	if (!isSameFormat) {
+		return false;
+	}
+	
 	// 共通キーワードをチェック
-	const commonKeywords = ['learn to play', 'armory', 'blitz', 'classic constructed', 'pro quest', 'draft'];
+	const commonKeywords = ['learn to play', 'armory', 'blitz', 'classic constructed', 'pro quest', 'draft', 'on demand', 'cc', 'll', 'pb'];
 	const hasCommonKeyword = commonKeywords.some(keyword => 
 		(title1.includes(keyword) || format1.includes(keyword)) &&
 		(title2.includes(keyword) || format2.includes(keyword))
