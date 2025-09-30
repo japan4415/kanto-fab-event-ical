@@ -114,8 +114,10 @@ async function scrapeEventFinder(): Promise<FaBEvent[]> {
 							continue; // 50kmより遠いイベントはスキップ
 						}
 
-						// イベントの日時をパース (ISO 8601形式)
-						const startDatetime = new Date(event.start_time);
+						// イベントの日時をパース
+						// APIのタイムゾーン情報が不正確なため、タイムゾーンを除去してJSTとして扱う
+						const timeWithoutTz = event.start_time.replace(/[+-]\d{2}:\d{2}$/, '');
+						const startDatetime = new Date(timeWithoutTz + '+09:00');
 
 						// イベント名と場所を取得
 						const eventName = event.nickname || '';
