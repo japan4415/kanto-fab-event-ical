@@ -25,31 +25,31 @@ const EXTERNAL_ICAL_FEEDS = [
 
 export default {
 	async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
-		console.log('Scheduled event triggered at', controller.cron);
+		console.log(`スケジュールされたイベントを開始しました (cron: ${controller.cron})`);
 		try {
-			// Get events from FaB official site
+			// FaB公式サイトからイベント取得
 			const officialEvents = await scrapeEventFinder();
-			console.log(`Found ${officialEvents.length} official events`);
-			
-			// Get events from external iCal feeds
+			console.log(`公式サイトから ${officialEvents.length} 件のイベントを取得しました`);
+
+			// 外部iCalフィードからイベント取得
 			const externalEvents = await fetchExternalEvents(env);
-			console.log(`Found ${externalEvents.length} external events`);
-			
-			// Remove duplicates and combine events
+			console.log(`外部カレンダーから ${externalEvents.length} 件のイベントを取得しました`);
+
+			// 重複を削除してイベントを統合
 			const uniqueEvents = removeDuplicateEvents(officialEvents, externalEvents);
-			console.log(`Total ${uniqueEvents.length} events (after deduplication)`);
-			
+			console.log(`重複削除後、合計 ${uniqueEvents.length} 件のイベントを処理しました`);
+
 			const icalContent = generateIcal(uniqueEvents);
-			
+
 			await env.BUCKET.put('calendar.ics', icalContent, {
 				httpMetadata: {
 					contentType: 'text/calendar; charset=utf-8'
 				}
 			});
-			
-			console.log('Successfully saved calendar.ics to R2 bucket');
+
+			console.log('calendar.ics を R2 バケットに正常に保存しました');
 		} catch (error) {
-			console.error('Error in scheduled task:', error);
+			console.error('スケジュールタスク実行中にエラーが発生しました:', error);
 		}
 	},
 } satisfies ExportedHandler<Env>;
@@ -93,7 +93,7 @@ async function scrapeEventFinder(): Promise<FaBEvent[]> {
 
 			const response = await fetch(`${apiUrl}?${params}`);
 			if (!response.ok) {
-				console.error(`HTTP error! status: ${response.status}`);
+				console.error(`APIリクエストが失敗しました (ステータス: ${response.status})`);
 				break;
 			}
 
@@ -134,7 +134,7 @@ async function scrapeEventFinder(): Promise<FaBEvent[]> {
 							details: event.description || ''
 						});
 					} catch (error) {
-						console.error('Error parsing event:', error);
+						console.error('イベントのパース中にエラーが発生しました:', error);
 						continue;
 					}
 				}
@@ -147,7 +147,7 @@ async function scrapeEventFinder(): Promise<FaBEvent[]> {
 				hasMorePages = false;
 			}
 		} catch (error) {
-			console.error(`Error fetching page ${currentPage}:`, error);
+			console.error(`ページ ${currentPage} の取得中にエラーが発生しました:`, error);
 			break;
 		}
 	}
@@ -161,21 +161,21 @@ async function fetchExternalEvents(env?: Env): Promise<FaBEvent[]> {
 	
 	for (const feedUrl of EXTERNAL_ICAL_FEEDS) {
 		try {
-			console.log(`Fetching iCal feed: ${feedUrl}`);
+			console.log(`iCalフィードを取得しています: ${feedUrl}`);
 			const response = await fetch(feedUrl);
-			
+
 			if (!response.ok) {
-				console.error(`Failed to fetch ${feedUrl}: ${response.status}`);
+				console.error(`iCalフィードの取得に失敗しました ${feedUrl} (ステータス: ${response.status})`);
 				continue;
 			}
-			
+
 			const icalText = await response.text();
 			const events = parseICalEvents(icalText, feedUrl, env);
-			console.log(`Parsed ${events.length} events from ${feedUrl}`);
-			
+			console.log(`${feedUrl} から ${events.length} 件のイベントをパースしました`);
+
 			allExternalEvents.push(...events);
 		} catch (error) {
-			console.error(`Error fetching ${feedUrl}:`, error);
+			console.error(`iCalフィードの取得中にエラーが発生しました ${feedUrl}:`, error);
 		}
 	}
 	
@@ -217,8 +217,8 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 		const jcalData = ICAL.parse(icalText);
 		const comp = new ICAL.Component(jcalData);
 		const vevents = comp.getAllSubcomponents('vevent');
-		
-		console.log(`Found ${vevents.length} VEVENT components in ${source}`);
+
+		console.log(`${source} から ${vevents.length} 件のVEVENTコンポーネントを検出しました`);
 		
 		for (const vevent of vevents) {
 			try {
@@ -289,7 +289,7 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 								count++;
 							}
 						} catch (recurError) {
-							console.warn('Error expanding recurring event:', recurError);
+							console.warn('繰り返しイベントの展開中にエラーが発生しました:', recurError);
 							// Fallback to single event
 							// Determine source name from URL
 							let sourceName = 'External';
@@ -345,16 +345,16 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 					}
 				}
 			} catch (error) {
-				console.warn('Error parsing individual event:', error);
+				console.warn('個別イベントのパース中にエラーが発生しました:', error);
 			}
 		}
 	} catch (error) {
-		console.error('Error parsing iCal data:', error);
+		console.error('iCalデータのパース中にエラーが発生しました:', error);
 	}
 	
-	// Remove duplicates within external events from the same source
+	// 同一ソース内の外部イベントの重複を削除
 	const uniqueEvents = removeDuplicateExternalEvents(events);
-	console.log(`External event deduplication: ${events.length} -> ${uniqueEvents.length} events`);
+	console.log(`外部イベントの重複削除: ${events.length} 件 → ${uniqueEvents.length} 件`);
 	
 	return uniqueEvents;
 }
@@ -367,7 +367,7 @@ function removeDuplicateExternalEvents(events: FaBEvent[]): FaBEvent[] {
 		if (!isDuplicate) {
 			uniqueEvents.push(event);
 		} else {
-			console.log(`External duplicate removed: ${event.title} matches existing event`);
+			console.log(`外部イベントの重複を削除しました: ${event.title} が既存のイベントと一致`);
 		}
 	}
 	
@@ -375,35 +375,35 @@ function removeDuplicateExternalEvents(events: FaBEvent[]): FaBEvent[] {
 }
 
 function removeDuplicateEvents(officialEvents: FaBEvent[], externalEvents: FaBEvent[]): FaBEvent[] {
-	// Filter events to reasonable time range (past 1 month to future 6 months)
+	// 適切な期間（過去1ヶ月〜未来6ヶ月）にイベントを絞り込み
 	const now = new Date();
 	const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 	const sixMonthsLater = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000);
-	
-	const recentExternalEvents = externalEvents.filter(e => 
+
+	const recentExternalEvents = externalEvents.filter(e =>
 		e.startDatetime >= oneMonthAgo && e.startDatetime <= sixMonthsLater
 	);
-	
-	console.log(`Filtered external events: ${externalEvents.length} -> ${recentExternalEvents.length} (within time range)`);
-	
+
+	console.log(`期間によるフィルタリング: ${externalEvents.length} 件 → ${recentExternalEvents.length} 件 (対象期間内)`);
+
 	const uniqueEvents = [...recentExternalEvents]; // 外部イベントを優先
 	const duplicateCount = { removed: 0, kept: 0 };
-	
+
 	for (const officialEvent of officialEvents) {
-		const matchingExternal = recentExternalEvents.find(externalEvent => 
+		const matchingExternal = recentExternalEvents.find(externalEvent =>
 			isDuplicateEvent(officialEvent, externalEvent)
 		);
-		
+
 		if (matchingExternal) {
 			duplicateCount.removed++;
-			console.log(`Duplicate removed: ${officialEvent.title} matches ${matchingExternal.title}`);
+			console.log(`重複イベントを削除しました: ${officialEvent.title} が ${matchingExternal.title} と一致`);
 		} else {
 			uniqueEvents.push(officialEvent);
 			duplicateCount.kept++;
 		}
 	}
-	
-	console.log(`Deduplication: ${duplicateCount.removed} duplicates removed, ${duplicateCount.kept} official events kept`);
+
+	console.log(`重複削除の結果: ${duplicateCount.removed} 件削除、${duplicateCount.kept} 件の公式イベントを保持しました`);
 	return uniqueEvents;
 }
 
