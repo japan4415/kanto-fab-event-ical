@@ -1,5 +1,4 @@
 import ical from 'ical-generator';
-import { parseHTML } from 'linkedom';
 import ICAL from 'ical.js';
 
 interface FaBEvent {
@@ -16,7 +15,6 @@ interface Env {
 	ENV?: string;
 }
 
-const ORDINAL_REGEX = /(\d{1,2})(st|nd|rd|th)/gi;
 const JST_OFFSET = 9 * 60; // JST is UTC+9
 
 // External iCal feed URLs
@@ -77,149 +75,75 @@ function generateIcal(events: FaBEvent[]): string {
 }
 
 async function scrapeEventFinder(): Promise<FaBEvent[]> {
-	const url = 'https://fabtcg.com/ja/events/';
-	const params = new URLSearchParams({
-		format: '',
-		type: '',
-		distance: '50',
-		query: '日本、東京都品川区上大崎２丁目１６ 目黒駅',
-		sort: 'date',
-		mode: 'event',
-		page: '1'
-	});
+	const apiUrl = 'https://gem.fabtcg.com/api/v1/locator/events/';
+	const searchQuery = '品川区';
 
-	// First request to get total page count
-	const firstPageResponse = await fetch(`${url}?${params}`);
-	if (!firstPageResponse.ok) {
-		throw new Error(`HTTP error! status: ${firstPageResponse.status}`);
-	}
-
-	const firstPageHtml = await firstPageResponse.text();
-	const { document: firstPageDoc } = parseHTML(firstPageHtml);
-	
-	const paginationLinks = firstPageDoc.querySelectorAll('body > article > div > div.container.paginator > div > div > div.pagination-arrow.pagination-arrow-next.text-right > li > a');
-	let totalPageCount = 1;
-	
-	if (paginationLinks.length > 0) {
-		const href = paginationLinks[0].getAttribute('href');
-		if (href) {
-			const urlParams = new URLSearchParams(href.split('?')[1]);
-			const pageParam = urlParams.get('page');
-			if (pageParam) {
-				totalPageCount = parseInt(pageParam, 10);
-			}
-		}
-	}
-	
 	const events: FaBEvent[] = [];
-	
-	for (let pageNumber = 1; pageNumber <= totalPageCount; pageNumber++) {
-		params.set('page', pageNumber.toString());
-		
-		const pageResponse = await fetch(`${url}?${params}`);
-		if (!pageResponse.ok) {
-			continue;
-		}
-		
-		const pageHtml = await pageResponse.text();
-		const { document } = parseHTML(pageHtml);
-		
-		const eventDetails = document.querySelectorAll('body > article > div > div.event');
-		
-		for (const eventDetail of eventDetails) {
-			try {
-				const insideDiv = eventDetail.querySelector('div.text-lg-left');
-				if (!insideDiv) continue;
-				
-				const h2 = insideDiv.querySelector('h2');
-				if (!h2) continue;
-				
-				const title = h2.textContent?.trim() || '';
-				const titleDatas = title.split('\n').map((s: string) => s.trim()).filter((s: string) => s);
-				
-				if (titleDatas.length < 3) continue;
-				
-				const pElements = eventDetail.querySelectorAll('p');
-				if (pElements.length < 2) continue;
-				
-				const datetimeFormatP = pElements[0];
-				const locateP = pElements[1];
-				
-				const year = new Date().getFullYear();
-				const datetimeText = datetimeFormatP.textContent?.trim() || '';
-				const startDatetimeCleaned = datetimeText
-					.replace(ORDINAL_REGEX, '$1')
-					.split('\n')[0]
-					.trim()
-					.replace(',', `, ${year},`);
-				
-				let startDatetime: Date;
-				try {
-					startDatetime = parseDateTime(startDatetimeCleaned);
-				} catch {
-					continue;
-				}
-				
-				// The scraped time is in JST - keep it as-is for generateIcal to handle consistently
-				
-				const formatText = datetimeText.split('\n')[2]?.trim() || '';
-				
-				events.push({
-					title: `${titleDatas[1]}@${titleDatas[2]}`,
-					eventType: titleDatas[1],
-					startDatetime,
-					location: locateP.textContent?.trim() || '',
-					format: formatText,
-					details: ''
-				});
-			} catch (error) {
-				continue;
+	let currentPage = 1;
+	let hasMorePages = true;
+
+	while (hasMorePages) {
+		try {
+			const params = new URLSearchParams({
+				search: searchQuery,
+				mode: 'event',
+				page: currentPage.toString()
+			});
+
+			const response = await fetch(`${apiUrl}?${params}`);
+			if (!response.ok) {
+				console.error(`HTTP error! status: ${response.status}`);
+				break;
 			}
+
+			const data = await response.json() as any;
+
+			// APIレスポンスからイベントを抽出
+			if (data.results && Array.isArray(data.results)) {
+				for (const event of data.results) {
+					try {
+						// イベントの日時をパース
+						const startDatetime = new Date(event.start_datetime || event.date);
+
+						// イベント名と場所を取得
+						const eventName = event.name || event.title || '';
+						const storeName = event.store?.name || event.location?.name || '';
+						const location = event.store?.address || event.location?.address ||
+						                event.store?.city || event.location?.city || '';
+
+						// フォーマット情報を取得
+						const format = event.format || event.event_type || 'Unknown';
+
+						events.push({
+							title: storeName ? `${eventName}@${storeName}` : eventName,
+							eventType: eventName,
+							startDatetime,
+							location,
+							format,
+							details: event.description || ''
+						});
+					} catch (error) {
+						console.error('Error parsing event:', error);
+						continue;
+					}
+				}
+			}
+
+			// 次のページがあるかチェック
+			if (data.next) {
+				currentPage++;
+			} else {
+				hasMorePages = false;
+			}
+		} catch (error) {
+			console.error(`Error fetching page ${currentPage}:`, error);
+			break;
 		}
 	}
-	
+
 	return events;
 }
 
-function parseDateTime(dateTimeStr: string): Date {
-	// First try pattern with minutes: "Sun 3 Aug, 2025, 1:30 PM"
-	let match = dateTimeStr.match(/^(\w{3})\s+(\d{1,2})\s+(\w{3}),\s+(\d{4}),\s+(\d{1,2}):(\d{2})\s+(AM|PM)$/i);
-	if (match) {
-		const [, , day, monthName, year, hour, minute, ampm] = match;
-		return createDate(day, monthName, year, hour, minute, ampm);
-	}
-	
-	// Then try pattern without minutes: "Sun 3 Aug, 2025, 1 PM"
-	match = dateTimeStr.match(/^(\w{3})\s+(\d{1,2})\s+(\w{3}),\s+(\d{4}),\s+(\d{1,2})\s+(AM|PM)$/i);
-	if (match) {
-		const [, , day, monthName, year, hour, ampm] = match;
-		return createDate(day, monthName, year, hour, '0', ampm);
-	}
-	
-	throw new Error(`Unable to parse datetime: ${dateTimeStr}`);
-}
-
-function createDate(day: string, monthName: string, year: string, hour: string, minute: string, ampm: string): Date {
-	const monthMap: { [key: string]: number } = {
-		jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
-		jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11
-	};
-	
-	const monthIndex = monthMap[monthName.toLowerCase()];
-	if (monthIndex === undefined) {
-		throw new Error(`Unknown month: ${monthName}`);
-	}
-	
-	let hour24 = parseInt(hour, 10);
-	if (ampm.toUpperCase() === 'PM' && hour24 !== 12) {
-		hour24 += 12;
-	} else if (ampm.toUpperCase() === 'AM' && hour24 === 12) {
-		hour24 = 0;
-	}
-	
-	// Create local JST date (not UTC) to avoid timezone conversion by ical-generator
-	return new Date(parseInt(year, 10), monthIndex, parseInt(day, 10), hour24, parseInt(minute, 10));
-}
 
 async function fetchExternalEvents(env?: Env): Promise<FaBEvent[]> {
 	const allExternalEvents: FaBEvent[] = [];
