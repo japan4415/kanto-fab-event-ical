@@ -77,6 +77,7 @@ function generateIcal(events: FaBEvent[]): string {
 async function scrapeEventFinder(): Promise<FaBEvent[]> {
 	const apiUrl = 'https://gem.fabtcg.com/api/v1/locator/events/';
 	const searchQuery = '品川区';
+	const MAX_DISTANCE_KM = 50; // 最大距離（km）
 
 	const events: FaBEvent[] = [];
 	let currentPage = 1;
@@ -102,21 +103,31 @@ async function scrapeEventFinder(): Promise<FaBEvent[]> {
 			if (data.results && Array.isArray(data.results)) {
 				for (const event of data.results) {
 					try {
-						// イベントの日時をパース
-						const startDatetime = new Date(event.start_datetime || event.date);
+						// 距離フィルタリング（50km以内のみ）
+						const distance = event.distance || 0;
+						const distanceUnit = event.distance_unit || 'km';
+
+						// kmに統一してチェック
+						const distanceInKm = distanceUnit === 'km' ? distance : distance * 1.60934; // mile to km
+
+						if (distanceInKm > MAX_DISTANCE_KM) {
+							continue; // 50kmより遠いイベントはスキップ
+						}
+
+						// イベントの日時をパース (ISO 8601形式)
+						const startDatetime = new Date(event.start_time);
 
 						// イベント名と場所を取得
-						const eventName = event.name || event.title || '';
-						const storeName = event.store?.name || event.location?.name || '';
-						const location = event.store?.address || event.location?.address ||
-						                event.store?.city || event.location?.city || '';
+						const eventName = event.nickname || '';
+						const storeName = event.organiser_name || '';
+						const location = event.address || '';
 
 						// フォーマット情報を取得
-						const format = event.format || event.event_type || 'Unknown';
+						const format = event.format_name || event.tournament_type || 'Unknown';
 
 						events.push({
 							title: storeName ? `${eventName}@${storeName}` : eventName,
-							eventType: eventName,
+							eventType: event.tournament_type || eventName,
 							startDatetime,
 							location,
 							format,
