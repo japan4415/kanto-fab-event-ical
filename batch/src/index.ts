@@ -28,7 +28,7 @@ export default {
 		console.log(`スケジュールされたイベントを開始しました (cron: ${controller.cron})`);
 		try {
 			// FaB公式サイトからイベント取得
-			const officialEvents = await scrapeEventFinder();
+			const officialEvents = await scrapeEventFinder(env);
 			console.log(`公式サイトから ${officialEvents.length} 件のイベントを取得しました`);
 
 			// 外部iCalフィードからイベント取得
@@ -74,7 +74,7 @@ function generateIcal(events: FaBEvent[]): string {
 	return calendar.toString();
 }
 
-async function scrapeEventFinder(): Promise<FaBEvent[]> {
+async function scrapeEventFinder(env?: Env): Promise<FaBEvent[]> {
 	const apiUrl = 'https://gem.fabtcg.com/api/v1/locator/events/';
 	const searchQuery = '品川区';
 	const MAX_DISTANCE_KM = 50; // 最大距離（km）
@@ -117,7 +117,12 @@ async function scrapeEventFinder(): Promise<FaBEvent[]> {
 						// イベントの日時をパース
 						// APIのタイムゾーン情報が不正確なため、タイムゾーンを除去してJSTとして扱う
 						const timeWithoutTz = event.start_time.replace(/[+-]\d{2}:\d{2}$/, '');
-						const startDatetime = new Date(timeWithoutTz + '+09:00');
+						let startDatetime: Date;
+						if (env?.ENV === 'cloudflare') {
+							startDatetime = new Date(timeWithoutTz + '+00:00');
+						} else {
+							startDatetime = new Date(timeWithoutTz + '+09:00');
+						}
 
 						// イベント名と場所を取得
 						const eventName = event.nickname || '';
