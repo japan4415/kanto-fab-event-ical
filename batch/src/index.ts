@@ -16,6 +16,21 @@ interface Env {
 }
 
 const JST_OFFSET = 9 * 60; // JST is UTC+9
+const MILLISECONDS_PER_MINUTE = 60 * 1000;
+const MILLISECONDS_PER_DAY = 24 * 60 * MILLISECONDS_PER_MINUTE;
+const EXTERNAL_LOOKAHEAD_DAYS = 30;
+const DUPLICATE_TIME_THRESHOLD_MS = 30 * MILLISECONDS_PER_MINUTE;
+const DUPLICATE_TIME_BUCKET_MS = DUPLICATE_TIME_THRESHOLD_MS;
+const RECURRENCE_EXPANSION_LIMIT = 50;
+const EXCLUDED_EXTERNAL_KEYWORDS = ['grand archive', '定休日'];
+const NON_GAME_KEYWORDS = ['定休日', '休み', '休業', 'closed'];
+const COMMON_DUPLICATE_KEYWORDS = ['learn to play', 'armory', 'blitz', 'classic constructed', 'pro quest', 'draft', 'on demand', 'cc', 'll', 'pb'];
+const KNOWN_VENUES = [
+	{ name: 'fable', tokens: ['fable'] },
+	{ name: 'tokyo fab', tokens: ['tokyo fab'] },
+	{ name: 'cardon', tokens: ['cardon'] },
+	{ name: 'amenity dream', tokens: ['amenity dream'] }
+] as const;
 
 // External iCal feed URLs
 const EXTERNAL_ICAL_FEEDS = [
@@ -23,20 +38,24 @@ const EXTERNAL_ICAL_FEEDS = [
 	'https://calendar.google.com/calendar/ical/tokyofab.info%40gmail.com/public/basic.ics'
 ];
 
+type DuplicateIndex = Map<string, FaBEvent[]>;
+
 export default {
 	async scheduled(controller: ScheduledController, env: Env, _ctx: ExecutionContext): Promise<void> {
 		console.log(`スケジュールされたイベントを開始しました (cron: ${controller.cron})`);
 		try {
+			const now = new Date();
+
 			// FaB公式サイトからイベント取得
 			const officialEvents = await scrapeEventFinder(env);
 			console.log(`公式サイトから ${officialEvents.length} 件のイベントを取得しました`);
 
 			// 外部iCalフィードからイベント取得
-			const externalEvents = await fetchExternalEvents(env);
+			const externalEvents = await fetchExternalEvents(env, now);
 			console.log(`外部カレンダーから ${externalEvents.length} 件のイベントを取得しました`);
 
 			// 重複を削除してイベントを統合
-			const uniqueEvents = removeDuplicateEvents(officialEvents, externalEvents);
+			const uniqueEvents = removeDuplicateEvents(officialEvents, externalEvents, now);
 			console.log(`重複削除後、合計 ${uniqueEvents.length} 件のイベントを処理しました`);
 
 			const icalContent = generateIcal(uniqueEvents);
@@ -163,7 +182,7 @@ async function scrapeEventFinder(env?: Env): Promise<FaBEvent[]> {
 }
 
 
-async function fetchExternalEvents(env?: Env): Promise<FaBEvent[]> {
+async function fetchExternalEvents(env?: Env, now = new Date()): Promise<FaBEvent[]> {
 	const allExternalEvents: FaBEvent[] = [];
 	
 	for (const feedUrl of EXTERNAL_ICAL_FEEDS) {
@@ -177,7 +196,7 @@ async function fetchExternalEvents(env?: Env): Promise<FaBEvent[]> {
 			}
 
 			const icalText = await response.text();
-			const events = parseICalEvents(icalText, feedUrl, env);
+			const events = parseICalEvents(icalText, feedUrl, env, now);
 			console.log(`${feedUrl} から ${events.length} 件のイベントをパースしました`);
 
 			allExternalEvents.push(...events);
@@ -216,9 +235,10 @@ function detectEventType(title: string): string {
 	return 'External Event';
 }
 
-function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[] {
+function parseICalEvents(icalText: string, source: string, env?: Env, now = new Date()): FaBEvent[] {
 	const events: FaBEvent[] = [];
 	const isCloudflare = (env?.ENV || 'local') === 'cloudflare';
+	const lookaheadEnd = getExternalLookaheadEnd(now);
 	
 	try {
 		const jcalData = ICAL.parse(icalText);
@@ -237,118 +257,48 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 				const description = event.description || '';
 				const startDate = event.startDate?.toJSDate();
 				
-				// 除外するキーワードをチェック
-				const excludeKeywords = ['grand archive', '定休日'];
-				const shouldExclude = excludeKeywords.some(keyword => 
-					summary.toLowerCase().includes(keyword) || 
-					description.toLowerCase().includes(keyword)
-				);
-				
-				if (shouldExclude) {
+				if (!startDate || !summary || shouldExcludeExternalEvent(summary, description)) {
 					continue; // このイベントをスキップ
 				}
 				
-				if (startDate && summary) {
-					// Handle recurring events by expanding them
-					if (event.isRecurring()) {
-						const now = new Date();
-						const sixMonthsLater = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000);
-						
-						try {
-							// Expand recurring events within the next 6 months
-							const expandedEvents = event.component.jCal;
-							const recurExpander = new ICAL.RecurExpansion({
-								component: event.component,
-								dtstart: event.startDate
-							});
-							
-							let count = 0;
-							let next;
-							while ((next = recurExpander.next()) && count < 50 && next.toJSDate() <= sixMonthsLater) {
-								let occurrenceDate = next.toJSDate();
-								
-								// Cloudflare環境では9時間後に変換
-								if (isCloudflare) {
-									occurrenceDate = new Date(occurrenceDate.getTime() + (JST_OFFSET * 60000));
-								}
-								
-								if (occurrenceDate >= now) {
-									// Determine source name from URL
-									let sourceName = 'External';
-									if (source.includes('fable.fabtcg')) {
-										sourceName = 'Fable';
-									} else if (source.includes('tokyofab.info')) {
-										sourceName = 'Tokyo FAB';
-									}
-									
-									// Detect event type from title
-									const eventType = detectEventType(summary);
-									
-									events.push({
-										title: `${summary}@${sourceName}`,
-										eventType: eventType,
-										startDatetime: occurrenceDate,
-										location: location,
-										format: eventType === 'External Event' ? 'External' : eventType,
-										details: description
-									});
-								}
-								count++;
-							}
-						} catch (recurError) {
-							console.warn('繰り返しイベントの展開中にエラーが発生しました:', recurError);
-							// Fallback to single event
-							// Determine source name from URL
-							let sourceName = 'External';
-							if (source.includes('fable.fabtcg')) {
-								sourceName = 'Fable';
-							} else if (source.includes('tokyofab.info')) {
-								sourceName = 'Tokyo FAB';
-							}
-							
-							// Cloudflare環境では9時間後に変換
-							const adjustedStartDate = isCloudflare && startDate 
-								? new Date(startDate.getTime() + (JST_OFFSET * 60000))
-								: startDate;
-								
-							// Detect event type from title
-							const eventType = detectEventType(summary);
-								
-							events.push({
-								title: `${summary}@${sourceName}`,
-								eventType: eventType,
-								startDatetime: adjustedStartDate || new Date(),
-								location: location,
-								format: eventType === 'External Event' ? 'External' : eventType,
-								details: description
-							});
-						}
-					} else {
-						// Single event
-						// Determine source name from URL
-						let sourceName = 'External';
-						if (source.includes('fable.fabtcg')) {
-							sourceName = 'Fable';
-						} else if (source.includes('tokyofab.info')) {
-							sourceName = 'Tokyo FAB';
-						}
-						
-						// Cloudflare環境では9時間後に変換
-						const adjustedStartDate = isCloudflare && startDate 
-							? new Date(startDate.getTime() + (JST_OFFSET * 60000))
-							: startDate;
-							
-						// Detect event type from title
-						const eventType = detectEventType(summary);
-							
-						events.push({
-							title: `${summary}@${sourceName}`,
-							eventType: eventType,
-							startDatetime: adjustedStartDate || new Date(),
-							location: location,
-							format: eventType === 'External Event' ? 'External' : eventType,
-							details: description
+				// Handle recurring events by expanding them
+				if (event.isRecurring()) {
+					try {
+						const recurExpander = new ICAL.RecurExpansion({
+							component: event.component,
+							dtstart: event.startDate
 						});
+						
+						let count = 0;
+						let next;
+						while ((next = recurExpander.next()) && count < RECURRENCE_EXPANSION_LIMIT) {
+							count++;
+							const occurrenceDate = adjustExternalStartDate(next.toJSDate(), isCloudflare);
+							if (!occurrenceDate) {
+								continue;
+							}
+
+							if (occurrenceDate > lookaheadEnd) {
+								break;
+							}
+
+							if (!isWithinExternalLookaheadWindow(occurrenceDate, now, lookaheadEnd)) {
+								continue;
+							}
+
+							events.push(createExternalEvent(summary, source, location, description, occurrenceDate));
+						}
+					} catch (recurError) {
+						console.warn('繰り返しイベントの展開中にエラーが発生しました:', recurError);
+						const adjustedStartDate = adjustExternalStartDate(startDate, isCloudflare);
+						if (adjustedStartDate && isWithinExternalLookaheadWindow(adjustedStartDate, now, lookaheadEnd)) {
+							events.push(createExternalEvent(summary, source, location, description, adjustedStartDate));
+						}
+					}
+				} else {
+					const adjustedStartDate = adjustExternalStartDate(startDate, isCloudflare);
+					if (adjustedStartDate && isWithinExternalLookaheadWindow(adjustedStartDate, now, lookaheadEnd)) {
+						events.push(createExternalEvent(summary, source, location, description, adjustedStartDate));
 					}
 				}
 			} catch (error) {
@@ -359,51 +309,51 @@ function parseICalEvents(icalText: string, source: string, env?: Env): FaBEvent[
 		console.error('iCalデータのパース中にエラーが発生しました:', error);
 	}
 	
-	// 同一ソース内の外部イベントの重複を削除
-	const uniqueEvents = removeDuplicateExternalEvents(events);
-	console.log(`外部イベントの重複削除: ${events.length} 件 → ${uniqueEvents.length} 件`);
-	
-	return uniqueEvents;
+	return removeDuplicateExternalEvents(events);
 }
 
 function removeDuplicateExternalEvents(events: FaBEvent[]): FaBEvent[] {
 	const uniqueEvents: FaBEvent[] = [];
+	const duplicateIndex = new Map<string, FaBEvent[]>();
+	let removedCount = 0;
 	
 	for (const event of events) {
-		const isDuplicate = uniqueEvents.some(existing => isDuplicateEvent(event, existing));
+		const isDuplicate = getDuplicateCandidates(duplicateIndex, event)
+			.some(existing => isDuplicateEvent(event, existing));
+
 		if (!isDuplicate) {
 			uniqueEvents.push(event);
-		} else {
-			console.log(`外部イベントの重複を削除しました: ${event.title} が既存のイベントと一致`);
+			addToDuplicateIndex(duplicateIndex, event);
+			continue;
 		}
+
+		removedCount++;
 	}
+
+	console.log(`外部イベントの重複削除: ${events.length} 件 → ${uniqueEvents.length} 件 (${removedCount} 件削除)`);
 	
 	return uniqueEvents;
 }
 
-function removeDuplicateEvents(officialEvents: FaBEvent[], externalEvents: FaBEvent[]): FaBEvent[] {
-	// 適切な期間（過去1ヶ月〜未来6ヶ月）にイベントを絞り込み
-	const now = new Date();
-	const oneMonthAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-	const sixMonthsLater = new Date(now.getTime() + 180 * 24 * 60 * 60 * 1000);
-
+function removeDuplicateEvents(officialEvents: FaBEvent[], externalEvents: FaBEvent[], now = new Date()): FaBEvent[] {
+	const lookaheadEnd = getExternalLookaheadEnd(now);
 	const recentExternalEvents = externalEvents.filter(e =>
-		e.startDatetime >= oneMonthAgo && e.startDatetime <= sixMonthsLater
+		isWithinExternalLookaheadWindow(e.startDatetime, now, lookaheadEnd)
 	);
 
-	console.log(`期間によるフィルタリング: ${externalEvents.length} 件 → ${recentExternalEvents.length} 件 (対象期間内)`);
+	console.log(`期間によるフィルタリング: ${externalEvents.length} 件 → ${recentExternalEvents.length} 件 (外部イベント: 未来${EXTERNAL_LOOKAHEAD_DAYS}日)`);
 
 	const uniqueEvents = [...recentExternalEvents]; // 外部イベントを優先
+	const externalDuplicateIndex = buildDuplicateIndex(recentExternalEvents);
 	const duplicateCount = { removed: 0, kept: 0 };
 
 	for (const officialEvent of officialEvents) {
-		const matchingExternal = recentExternalEvents.find(externalEvent =>
+		const matchingExternal = getDuplicateCandidates(externalDuplicateIndex, officialEvent).find(externalEvent =>
 			isDuplicateEvent(officialEvent, externalEvent)
 		);
 
 		if (matchingExternal) {
 			duplicateCount.removed++;
-			console.log(`重複イベントを削除しました: ${officialEvent.title} が ${matchingExternal.title} と一致`);
 		} else {
 			uniqueEvents.push(officialEvent);
 			duplicateCount.kept++;
@@ -414,11 +364,183 @@ function removeDuplicateEvents(officialEvents: FaBEvent[], externalEvents: FaBEv
 	return uniqueEvents;
 }
 
+function createExternalEvent(
+	summary: string,
+	source: string,
+	location: string,
+	description: string,
+	startDatetime: Date
+): FaBEvent {
+	const eventType = detectEventType(summary);
+
+	return {
+		title: `${summary}@${getExternalSourceName(source)}`,
+		eventType,
+		startDatetime,
+		location,
+		format: eventType === 'External Event' ? 'External' : eventType,
+		details: description
+	};
+}
+
+function getExternalSourceName(source: string): string {
+	if (source.includes('fable.fabtcg')) {
+		return 'Fable';
+	}
+
+	if (source.includes('tokyofab.info')) {
+		return 'Tokyo FAB';
+	}
+
+	return 'External';
+}
+
+function shouldExcludeExternalEvent(summary: string, description: string): boolean {
+	const summaryLower = summary.toLowerCase();
+	const descriptionLower = description.toLowerCase();
+
+	return EXCLUDED_EXTERNAL_KEYWORDS.some(keyword =>
+		summaryLower.includes(keyword) || descriptionLower.includes(keyword)
+	);
+}
+
+function adjustExternalStartDate(startDate: Date | undefined, isCloudflare: boolean): Date | undefined {
+	if (!startDate) {
+		return undefined;
+	}
+
+	if (!isCloudflare) {
+		return startDate;
+	}
+
+	return new Date(startDate.getTime() + (JST_OFFSET * MILLISECONDS_PER_MINUTE));
+}
+
+function getExternalLookaheadEnd(now: Date): Date {
+	return new Date(now.getTime() + (EXTERNAL_LOOKAHEAD_DAYS * MILLISECONDS_PER_DAY));
+}
+
+function isWithinExternalLookaheadWindow(startDatetime: Date, now: Date, lookaheadEnd = getExternalLookaheadEnd(now)): boolean {
+	return startDatetime >= now && startDatetime <= lookaheadEnd;
+}
+
+function buildDuplicateIndex(events: FaBEvent[]): DuplicateIndex {
+	const index = new Map<string, FaBEvent[]>();
+
+	for (const event of events) {
+		addToDuplicateIndex(index, event);
+	}
+
+	return index;
+}
+
+function addToDuplicateIndex(index: DuplicateIndex, event: FaBEvent): void {
+	const bucketKey = getDuplicateBucketKey(event);
+	const existingBucket = index.get(bucketKey);
+
+	if (existingBucket) {
+		existingBucket.push(event);
+		return;
+	}
+
+	index.set(bucketKey, [event]);
+}
+
+function getDuplicateCandidates(index: DuplicateIndex, event: FaBEvent): FaBEvent[] {
+	const candidates: FaBEvent[] = [];
+
+	for (const key of getDuplicateCandidateKeys(event)) {
+		const bucketEvents = index.get(key);
+		if (bucketEvents) {
+			candidates.push(...bucketEvents);
+		}
+	}
+
+	return candidates;
+}
+
+function getDuplicateCandidateKeys(event: FaBEvent): string[] {
+	const bucketPrefix = getDuplicateBucketPrefix(event);
+	const timeBucket = getDuplicateTimeBucket(event.startDatetime);
+
+	return [timeBucket - 1, timeBucket, timeBucket + 1].map(bucket =>
+		`${bucketPrefix}|${bucket}`
+	);
+}
+
+function getDuplicateBucketKey(event: FaBEvent): string {
+	return `${getDuplicateBucketPrefix(event)}|${getDuplicateTimeBucket(event.startDatetime)}`;
+}
+
+function getDuplicateBucketPrefix(event: FaBEvent): string {
+	return `${normalizeVenue(event)}|${normalizeFormat(event)}`;
+}
+
+function getDuplicateTimeBucket(startDatetime: Date): number {
+	return Math.floor(startDatetime.getTime() / DUPLICATE_TIME_BUCKET_MS);
+}
+
+function normalizeVenue(event: FaBEvent): string {
+	const searchTargets = [event.location.toLowerCase(), event.title.toLowerCase()];
+
+	for (const venue of KNOWN_VENUES) {
+		if (searchTargets.some(target => venue.tokens.some(token => target.includes(token)))) {
+			return venue.name;
+		}
+	}
+
+	return 'unknown';
+}
+
+function normalizeFormat(event: Pick<FaBEvent, 'format' | 'eventType'>): string {
+	const candidates = [event.format, event.eventType]
+		.map(value => value.toLowerCase().trim())
+		.filter(Boolean);
+
+	for (const candidate of candidates) {
+		if (candidate.includes('project blue') || candidate.includes('pb')) {
+			return 'project blue';
+		}
+
+		if (candidate.includes('classic constructed') || candidate.includes('cc') || candidate.includes('classic')) {
+			return 'classic constructed';
+		}
+
+		if (candidate.includes('blitz') || candidate.includes('ブリッツ')) {
+			return 'blitz';
+		}
+
+		if (candidate.includes('living legend') || candidate.includes('ll')) {
+			return 'living legend';
+		}
+
+		if (candidate.includes('learn to play')) {
+			return 'learn to play';
+		}
+
+		if (candidate.includes('armory')) {
+			return 'armory';
+		}
+
+		if (candidate.includes('pro quest')) {
+			return 'pro quest';
+		}
+
+		if (candidate.includes('draft')) {
+			return 'draft';
+		}
+
+		if (candidate.includes('on demand')) {
+			return 'on demand';
+		}
+	}
+
+	return candidates[0] || 'unknown';
+}
+
 function isDuplicateEvent(event1: FaBEvent, event2: FaBEvent): boolean {
-	// Skip non-game events
-	const nonGameKeywords = ['定休日', '休み', '休業', 'closed'];
 	const isNonGameEvent = (event: FaBEvent) => 
-		nonGameKeywords.some(keyword => 
+		NON_GAME_KEYWORDS.some(keyword => 
 			event.title.toLowerCase().includes(keyword) ||
 			event.format.toLowerCase().includes(keyword)
 		);
@@ -435,24 +557,12 @@ function isDuplicateEvent(event1: FaBEvent, event2: FaBEvent): boolean {
 		return false;
 	}
 	
-	// 場所の比較（同じ店舗かどうか）
-	const location1 = event1.location.toLowerCase();
-	const location2 = event2.location.toLowerCase();
 	const title1 = event1.title.toLowerCase();
 	const title2 = event2.title.toLowerCase();
-	
-	const isSameVenue = (
-		// Both locations contain the same venue name
-		(location1.includes('fable') && location2.includes('fable')) ||
-		(location1.includes('tokyo fab') && location2.includes('tokyo fab')) ||
-		(location1.includes('cardon') && location2.includes('cardon')) ||
-		(location1.includes('amenity dream') && location2.includes('amenity dream')) ||
-		// Or both titles contain the same venue name (handle empty location case)
-		(title1.includes('@fable') && title2.includes('@fable')) ||
-		(title1.includes('@tokyo fab') && title2.includes('@tokyo fab')) ||
-		(title1.includes('@cardon') && title2.includes('@cardon')) ||
-		(title1.includes('@amenity dream') && title2.includes('@amenity dream'))
-	);
+
+	const venue1 = normalizeVenue(event1);
+	const venue2 = normalizeVenue(event2);
+	const isSameVenue = venue1 !== 'unknown' && venue1 === venue2;
 	
 	if (!isSameVenue) {
 		return false;
@@ -465,7 +575,8 @@ function isDuplicateEvent(event1: FaBEvent, event2: FaBEvent): boolean {
 	// フォーマットが同じかチェック
 	const isSameFormat = (
 		format1 === format2 ||
-		event1.eventType.toLowerCase() === event2.eventType.toLowerCase()
+		event1.eventType.toLowerCase() === event2.eventType.toLowerCase() ||
+		normalizeFormat(event1) === normalizeFormat(event2)
 	);
 	
 	if (!isSameFormat) {
@@ -473,8 +584,7 @@ function isDuplicateEvent(event1: FaBEvent, event2: FaBEvent): boolean {
 	}
 	
 	// 共通キーワードをチェック
-	const commonKeywords = ['learn to play', 'armory', 'blitz', 'classic constructed', 'pro quest', 'draft', 'on demand', 'cc', 'll', 'pb'];
-	const hasCommonKeyword = commonKeywords.some(keyword => 
+	const hasCommonKeyword = COMMON_DUPLICATE_KEYWORDS.some(keyword => 
 		(title1.includes(keyword) || format1.includes(keyword)) &&
 		(title2.includes(keyword) || format2.includes(keyword))
 	);
@@ -522,4 +632,4 @@ function calculateStringSimilarity(str1: string, str2: string): number {
 }
 
 // Export functions for local use
-export { scrapeEventFinder, generateIcal, fetchExternalEvents, removeDuplicateEvents };
+export { EXTERNAL_LOOKAHEAD_DAYS, scrapeEventFinder, generateIcal, fetchExternalEvents, parseICalEvents, removeDuplicateEvents };
