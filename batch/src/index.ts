@@ -19,6 +19,7 @@ const JST_OFFSET = 9 * 60; // JST is UTC+9
 const MILLISECONDS_PER_MINUTE = 60 * 1000;
 const MILLISECONDS_PER_DAY = 24 * 60 * MILLISECONDS_PER_MINUTE;
 const EXTERNAL_LOOKAHEAD_DAYS = 30;
+const ICAL_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6時間
 const DUPLICATE_TIME_THRESHOLD_MS = 30 * MILLISECONDS_PER_MINUTE;
 const DUPLICATE_TIME_BUCKET_MS = DUPLICATE_TIME_THRESHOLD_MS;
 const RECURRENCE_EXPANSION_LIMIT = 50;
@@ -182,29 +183,74 @@ async function scrapeEventFinder(env?: Env): Promise<FaBEvent[]> {
 }
 
 
-async function fetchExternalEvents(env?: Env, now = new Date()): Promise<FaBEvent[]> {
-	const allExternalEvents: FaBEvent[] = [];
-	
-	for (const feedUrl of EXTERNAL_ICAL_FEEDS) {
+function icalCacheKey(feedUrl: string): string {
+	return `cache/ical/${encodeURIComponent(feedUrl)}`;
+}
+
+async function fetchICalTextWithCache(feedUrl: string, bucket: R2Bucket | undefined): Promise<string | null> {
+	// キャッシュからの読み込みを試行
+	if (bucket) {
 		try {
-			console.log(`iCalフィードを取得しています: ${feedUrl}`);
-			const response = await fetch(feedUrl);
-
-			if (!response.ok) {
-				console.error(`iCalフィードの取得に失敗しました ${feedUrl} (ステータス: ${response.status})`);
-				continue;
+			const cached = await bucket.get(icalCacheKey(feedUrl));
+			if (cached) {
+				const age = (Date.now() - (cached.uploaded?.getTime() ?? 0)) / 1000;
+				if (age < ICAL_CACHE_TTL_SECONDS) {
+					console.log(`iCalフィードをキャッシュから取得しました: ${feedUrl} (経過: ${Math.round(age / 60)}分)`);
+					return await cached.text();
+				}
 			}
-
-			const icalText = await response.text();
-			const events = parseICalEvents(icalText, feedUrl, env, now);
-			console.log(`${feedUrl} から ${events.length} 件のイベントをパースしました`);
-
-			allExternalEvents.push(...events);
 		} catch (error) {
-			console.error(`iCalフィードの取得中にエラーが発生しました ${feedUrl}:`, error);
+			console.warn('キャッシュ読み込み中にエラーが発生しました:', error);
 		}
 	}
-	
+
+	// フィードを取得
+	console.log(`iCalフィードを取得しています: ${feedUrl}`);
+	const response = await fetch(feedUrl);
+
+	if (!response.ok) {
+		console.error(`iCalフィードの取得に失敗しました ${feedUrl} (ステータス: ${response.status})`);
+		return null;
+	}
+
+	const icalText = await response.text();
+
+	// キャッシュに保存
+	if (bucket) {
+		try {
+			await bucket.put(icalCacheKey(feedUrl), icalText, {
+				httpMetadata: { contentType: 'text/calendar; charset=utf-8' }
+			});
+		} catch (error) {
+			console.warn('キャッシュ保存中にエラーが発生しました:', error);
+		}
+	}
+
+	return icalText;
+}
+
+async function fetchExternalEvents(env?: Env, now = new Date()): Promise<FaBEvent[]> {
+	const bucket = env?.BUCKET;
+	const results = await Promise.allSettled(
+		EXTERNAL_ICAL_FEEDS.map(async (feedUrl) => {
+			const icalText = await fetchICalTextWithCache(feedUrl, bucket);
+			if (!icalText) return [];
+
+			const events = parseICalEvents(icalText, feedUrl, env, now);
+			console.log(`${feedUrl} から ${events.length} 件のイベントをパースしました`);
+			return events;
+		})
+	);
+
+	const allExternalEvents: FaBEvent[] = [];
+	for (const result of results) {
+		if (result.status === 'fulfilled') {
+			allExternalEvents.push(...result.value);
+		} else {
+			console.error('iCalフィードの取得中にエラーが発生しました:', result.reason);
+		}
+	}
+
 	return allExternalEvents;
 }
 
@@ -599,36 +645,19 @@ function isDuplicateEvent(event1: FaBEvent, event2: FaBEvent): boolean {
 function calculateStringSimilarity(str1: string, str2: string): number {
 	if (str1 === str2) return 1.0;
 	if (str1.length === 0 || str2.length === 0) return 0.0;
-	
-	// Levenshtein距離ベースの類似度計算
-	const matrix: number[][] = [];
-	const len1 = str1.length;
-	const len2 = str2.length;
-	
-	for (let i = 0; i <= len1; i++) {
-		matrix[i] = [i];
+
+	// トークンベースのJaccard類似度（O(n+m)）
+	const tokens1 = new Set(str1.split(/[\s@\-\/【】]+/).filter(Boolean));
+	const tokens2 = new Set(str2.split(/[\s@\-\/【】]+/).filter(Boolean));
+
+	if (tokens1.size === 0 || tokens2.size === 0) return 0.0;
+
+	let intersection = 0;
+	for (const token of tokens1) {
+		if (tokens2.has(token)) intersection++;
 	}
-	
-	for (let j = 0; j <= len2; j++) {
-		matrix[0][j] = j;
-	}
-	
-	for (let i = 1; i <= len1; i++) {
-		for (let j = 1; j <= len2; j++) {
-			if (str1[i - 1] === str2[j - 1]) {
-				matrix[i][j] = matrix[i - 1][j - 1];
-			} else {
-				matrix[i][j] = Math.min(
-					matrix[i - 1][j] + 1,     // deletion
-					matrix[i][j - 1] + 1,     // insertion
-					matrix[i - 1][j - 1] + 1  // substitution
-				);
-			}
-		}
-	}
-	
-	const maxLength = Math.max(len1, len2);
-	return 1 - (matrix[len1][len2] / maxLength);
+
+	return intersection / (tokens1.size + tokens2.size - intersection);
 }
 
 // Export functions for local use
