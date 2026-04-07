@@ -120,6 +120,57 @@ test('同一店舗・同一フォーマット・30分以内の公式イベント
 	assert.equal(merged[0]?.title, externalEvents[0]?.title);
 });
 
+test('RRULE UNTILが過去日付の繰り返しイベントはスキップされる', () => {
+	const now = new Date('2026-03-22T00:00:00Z');
+	const icalText = buildIcs([
+		buildEvent({
+			uid: 'past-until-1',
+			dtstart: '20230101T100000Z',
+			summary: 'Old Weekly Blitz',
+			location: 'Tokyo FAB',
+			rrule: 'FREQ=WEEKLY;UNTIL=20250101T000000Z',
+		}),
+	]);
+
+	const events = parseICalEvents(icalText, TOKYO_FAB_SOURCE, LOCAL_ENV, now);
+
+	assert.equal(events.length, 0);
+});
+
+test('RRULE UNTILが未来日付の繰り返しイベントはスキップされない', () => {
+	const now = new Date('2026-03-22T00:00:00Z');
+	const icalText = buildIcs([
+		buildEvent({
+			uid: 'future-until-1',
+			dtstart: '20260322T100000Z',
+			summary: 'Active Weekly CC',
+			location: 'Tokyo FAB',
+			rrule: 'FREQ=WEEKLY;UNTIL=20260501T000000Z',
+		}),
+	]);
+
+	const events = parseICalEvents(icalText, TOKYO_FAB_SOURCE, LOCAL_ENV, now);
+
+	assert.ok(events.length > 0, `期待: 1件以上のイベント、実際: ${events.length}件`);
+});
+
+test('RRULE UNTILなし（無期限）の繰り返しイベントはスキップされない', () => {
+	const now = new Date('2026-03-22T00:00:00Z');
+	const icalText = buildIcs([
+		buildEvent({
+			uid: 'no-until-1',
+			dtstart: '20260322T100000Z',
+			summary: 'Ongoing Weekly Blitz',
+			location: 'Tokyo FAB',
+			rrule: 'FREQ=WEEKLY;COUNT=10',
+		}),
+	]);
+
+	const events = parseICalEvents(icalText, TOKYO_FAB_SOURCE, LOCAL_ENV, now);
+
+	assert.ok(events.length > 0, `期待: 1件以上のイベント、実際: ${events.length}件`);
+});
+
 test('店舗またはフォーマットが違う公式イベントは重複扱いしない', () => {
 	const now = new Date('2026-03-22T00:00:00Z');
 	const externalEvents = [

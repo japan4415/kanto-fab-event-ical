@@ -22,7 +22,8 @@ const EXTERNAL_LOOKAHEAD_DAYS = 30;
 const ICAL_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6時間
 const DUPLICATE_TIME_THRESHOLD_MS = 30 * MILLISECONDS_PER_MINUTE;
 const DUPLICATE_TIME_BUCKET_MS = DUPLICATE_TIME_THRESHOLD_MS;
-const RECURRENCE_EXPANSION_LIMIT = 50;
+// 過去に開始した繰り返しイベント（例: 2023年10月開始の週次イベント）が現在日まで到達するために必要な余裕（週次で約7年分）
+const RECURRENCE_EXPANSION_LIMIT = 365;
 const EXCLUDED_EXTERNAL_KEYWORDS = ['grand archive', '定休日'];
 const NON_GAME_KEYWORDS = ['定休日', '休み', '休業', 'closed'];
 const COMMON_DUPLICATE_KEYWORDS = ['learn to play', 'armory', 'blitz', 'classic constructed', 'pro quest', 'draft', 'on demand', 'cc', 'll', 'pb'];
@@ -309,6 +310,18 @@ function parseICalEvents(icalText: string, source: string, env?: Env, now = new 
 				
 				// Handle recurring events by expanding them
 				if (event.isRecurring()) {
+					// 終了済み繰り返しイベントをスキップ（CPU時間の節約）
+					const rruleProp = vevent.getFirstProperty('rrule');
+					if (rruleProp) {
+						const rruleVal = rruleProp.getFirstValue();
+						if (rruleVal && rruleVal.until) {
+							const untilDate = rruleVal.until.toJSDate();
+							if (untilDate < now) {
+								continue;
+							}
+						}
+					}
+
 					try {
 						const recurExpander = new ICAL.RecurExpansion({
 							component: event.component,
