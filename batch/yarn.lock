@@ -462,10 +462,10 @@ get-tsconfig@^4.7.5:
   dependencies:
     resolve-pkg-maps "^1.0.0"
 
-ical-generator@^9.0.0:
-  version "9.0.0"
-  resolved "https://registry.yarnpkg.com/ical-generator/-/ical-generator-9.0.0.tgz#961df710582d5a7706055653ad33ed3e389f2f44"
-  integrity sha512-Ohpcw5fN8LhrnKyEQwISP7/EYfoafy0Nb1ISIMET0GWdsHrWpiqIdLocSi5vrYAdjF8QKy1GkaSk/n+GfzR/8A==
+ical-generator@^11.1.0:
+  version "11.1.0"
+  resolved "https://registry.yarnpkg.com/ical-generator/-/ical-generator-11.1.0.tgz#6b7669e42e1a656beb91cebcb06bb1856d339e5e"
+  integrity sha512-/CSyXcelySK5qYAUxXnwzhAi1UPVnapnVMXqkRQ+L0RXHCFtzqLm92o5PD0ZRhaWBCtkS0hP8YIxMrSRZ+8Zug==
 
 kleur@^4.1.5:
   version "4.1.5"
